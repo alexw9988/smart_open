@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_PART_SIZE = 50 * 1024**2
 """Default minimum part size for S3 multipart uploads"""
+DEFAULT_MAX_PART_SIZE = 5 * 1024**3
+"""Default maximum part size for S3 multipart uploads"""
 MIN_MIN_PART_SIZE = 5 * 1024 ** 2
 """The absolute minimum permitted by Amazon."""
 
@@ -231,6 +233,7 @@ def open(
     version_id=None,
     buffer_size=DEFAULT_BUFFER_SIZE,
     min_part_size=DEFAULT_MIN_PART_SIZE,
+    max_part_size=DEFAULT_MAX_PART_SIZE,
     multipart_upload=True,
     defer_seek=False,
     client=None,
@@ -251,6 +254,8 @@ def open(
         The buffer size to use when performing I/O.
     min_part_size: int, optional
         The minimum part size for multipart uploads.  For writing only.
+    max_part_size: int, optional
+        The maximum part size for multipart uploads.  For writing only.
     multipart_upload: bool, optional
         Default: `True`
         If set to `True`, will use multipart upload for writing to S3. If set
@@ -303,6 +308,7 @@ def open(
                 bucket_id,
                 key_id,
                 min_part_size=min_part_size,
+                max_part_size=max_part_size,
                 client=client,
                 client_kwargs=client_kwargs,
                 writebuffer=writebuffer,
@@ -745,6 +751,7 @@ class MultipartWriter(io.BufferedIOBase):
         bucket,
         key,
         min_part_size=DEFAULT_MIN_PART_SIZE,
+        max_part_size=DEFAULT_MAX_PART_SIZE,
         client=None,
         client_kwargs=None,
         writebuffer=None,
@@ -753,6 +760,7 @@ class MultipartWriter(io.BufferedIOBase):
             logger.warning("S3 requires minimum part size >= 5MB; \
 multipart upload may fail")
         self._min_part_size = min_part_size
+        self._max_part_size = max_part_size
 
         _initialize_boto3(self, client, client_kwargs, bucket, key)
 
@@ -867,13 +875,17 @@ multipart upload may fail")
         There's buffering happening under the covers, so this may not actually
         do any HTTP transfer right away."""
 
-        length = self._buf.write(b)
-        self._total_bytes += length
+        total_length = 0
+        for pos in range(0, len(b), self._max_part_size):
+            chunk = b[pos:pos+self._max_part_size]
+            length = self._buf.write(chunk)
+            self._total_bytes += length
+            total_length += length
+        
+            if self._buf.tell() >= self._min_part_size:
+                self._upload_next_part()
 
-        if self._buf.tell() >= self._min_part_size:
-            self._upload_next_part()
-
-        return length
+        return total_length
 
     def terminate(self):
         """Cancel the underlying multipart upload."""
